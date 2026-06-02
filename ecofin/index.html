@@ -68,7 +68,9 @@
   .dot{width:10px;height:10px;border-radius:3px; display:inline-block;}
   .num{font-variant-numeric:tabular-nums;}
   .bar{height:5px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:6px;}
+  .bar.lg{height:9px; margin-top:8px;}
   .bar i{display:block; height:100%;}
+  .barfill{transition:width .65s cubic-bezier(.22,.61,.36,1);}
   .goalline{font-size:11.5px; margin-top:3px; display:flex; align-items:center; gap:4px; color:var(--muted);}
   .goalline.over{color:var(--accent);}
   .seclbl{color:var(--muted); font-size:13px; margin:18px 0 6px;}
@@ -107,6 +109,15 @@ const mk=iso=>iso.slice(0,7);
 const uid=()=>Math.random().toString(36).slice(2,10);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
+/* ----------- limites / metas ----------- */
+function goalSpent(g, month){ return S.transactions.filter(x=>mk(x.date)===month && (g.category==="Geral"||x.category===g.category)).reduce((s,x)=>s+x.amount,0); }
+function relevantGoals(cat){ return S.goals.filter(g=>g.category==="Geral"||g.category===cat); }
+function barHTML(spent, limit, big){
+  const pct=limit>0?Math.min(100,spent/limit*100):0; const over=spent>limit;
+  const col=over?'var(--accent)':(pct>=80?'#C98A2B':'var(--good)');
+  return `<div class="bar${big?' lg':''}"><i class="barfill" data-w="${pct}%" style="width:0;background:${col}"></i></div>`;
+}
+
 /* ----------- icons (inline svg) ----------- */
 const IC={
   chat:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
@@ -118,6 +129,7 @@ const IC={
   right:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>',
   target:'<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>',
   repeat:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
+  gauge:'<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4.5-5.5"/></svg>',
 };
 
 /* ----------- state ----------- */
@@ -182,10 +194,9 @@ async function handleSend(text){
     const t=p.transaction;
     const tx={id:uid(), amount:Math.abs(Number(t.amount)||0), category:CATEGORIES.includes(t.category)?t.category:"Outros", description:(t.description||"Gasto").slice(0,60), date:/^\d{4}-\d{2}-\d{2}$/.test(t.date||"")?t.date:todayISO()};
     S.transactions.unshift(tx); save(); addBot({kind:"tx",txId:tx.id});
-    const g=S.goals.find(x=>x.category===tx.category);
-    if(g){ const spent=S.transactions.filter(x=>x.category===g.category&&mk(x.date)===mk(tx.date)).reduce((s,x)=>s+x.amount,0);
-      if(spent>g.limit) addBot({text:`Você passou do limite de ${g.category} (${fmt(spent)} de ${fmt(g.limit)}).`});
-      else if(spent>=g.limit*0.8) addBot({text:`Já são ${fmt(spent)} em ${g.category} — perto do limite de ${fmt(g.limit)}.`}); }
+    relevantGoals(tx.category).forEach(g=>{ const spent=goalSpent(g, mk(tx.date)); const onde=g.category==="Geral"?"":` em ${g.category}`; const oLim=g.category==="Geral"?"limite geral":`limite de ${g.category}`;
+      if(spent>g.limit) addBot({text:`Você passou do ${oLim} (${fmt(spent)} de ${fmt(g.limit)}).`});
+      else if(spent>=g.limit*0.8) addBot({text:`Já são ${fmt(spent)}${onde} — perto do limite de ${fmt(g.limit)}.`}); });
   }
   else if(p.intent==="goal"&&p.goal){
     const cat=CATEGORIES.includes(p.goal.category)?p.goal.category:"Outros"; const lim=Math.abs(Number(p.goal.limit)||0);
@@ -231,6 +242,16 @@ function toggleFixedPaid(id){
   save(); render();
 }
 
+/* ---- limites ---- */
+function addGoal(category, value){
+  const cat=(category==="Geral"||CATEGORIES.includes(category))?category:"Outros";
+  const lim=Math.abs(parseFloat(String(value).replace(".","").replace(",","."))||0);
+  if(!lim) return false;
+  S.goals=S.goals.filter(g=>g.category!==cat).concat([{id:uid(),category:cat,limit:lim}]);
+  save(); render(); return true;
+}
+function delGoal(id){ S.goals=S.goals.filter(g=>g.id!==id); save(); render(); }
+
 function toggleVoice(){
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SR){ addBot({text:"Voz não disponível neste navegador."}); render(); return; }
@@ -247,11 +268,13 @@ function msgHTML(m){
   if(m.kind==="tx"){
     const t=S.transactions.find(x=>x.id===m.txId);
     if(!t) return `<div class="b">Lançamento removido.</div>`;
+    const gb=relevantGoals(t.category).map(g=>{ const spent=goalSpent(g, mk(t.date)); const over=spent>g.limit;
+      return `<div class="goalline ${over?'over':''}" style="margin-top:8px">${IC.target} ${g.category==="Geral"?"limite geral":g.category}: ${fmt(spent)} de ${fmt(g.limit)}${over?' — ultrapassado':''}</div>${barHTML(spent,g.limit,true)}`; }).join("");
     return `<div class="b"><div class="lbl">Registrado</div>
       <div class="row"><span class="big">${fmt(t.amount)}</span>
         <select class="catsel" data-id="${t.id}">${CATEGORIES.map(c=>`<option ${c===t.category?"selected":""}>${c}</option>`).join("")}</select></div>
       <div class="row" style="margin-top:6px"><span style="color:var(--inkSoft);font-size:14px">${esc(t.description)}</span>
-        <button class="ibs del" data-id="${t.id}">${IC.trash}</button></div></div>`;
+        <button class="ibs del" data-id="${t.id}">${IC.trash}</button></div>${gb}</div>`;
   }
   if(m.kind==="summary"){
     const top=m.top.length?m.top.map(([c,v])=>`<div class="row" style="padding:3px 0;font-size:14px"><span><span class="dot" style="background:${CAT_COLOR[c]}"></span> ${c}</span><span class="num">${fmt(v)}</span></div>`).join(""):'<span style="color:var(--muted);font-size:14px">Sem gastos ainda.</span>';
@@ -324,6 +347,36 @@ function fixedHTML(){
   </div>`;
 }
 
+function limitsHTML(){
+  const label=new Date(S.selMonth+"-02").toLocaleDateString("pt-BR",{month:"long",year:"numeric"});
+  const items=S.goals.map(g=>{
+    const spent=goalSpent(g, S.selMonth); const pct=g.limit>0?spent/g.limit*100:0; const over=spent>g.limit;
+    const name=g.category==="Geral"?"Limite geral do mês":g.category;
+    const tag=g.category==="Geral"?IC.target+" " : `<span class="dot" style="background:${CAT_COLOR[g.category]||'#9A9082'}"></span> `;
+    return `<div class="catrow">
+      <div class="row"><span>${tag}${name}</span>
+        <span><span class="num">${fmt(spent)}</span> <span style="color:var(--muted)">/ ${fmt(g.limit)}</span>
+        <button class="ibs goaldel" data-id="${g.id}" style="vertical-align:middle">${IC.trash}</button></span></div>
+      ${barHTML(spent,g.limit,true)}
+      <div class="goalline ${over?'over':''}">${over?`ultrapassou em ${fmt(spent-g.limit)}`:`faltam ${fmt(g.limit-spent)} — ${Math.round(pct)}% usado`}</div>
+    </div>`;
+  }).join("");
+  const opts=['Geral'].concat(CATEGORIES).map(c=>`<option ${c==='Geral'?'selected':''}>${c}</option>`).join("");
+  return `<div class="rep">
+    <div class="mnav"><button class="nb" data-month="-1">${IC.left}</button><span class="mlabel">${label}</span><button class="nb" data-month="1">${IC.right}</button></div>
+    <div class="totwrap"><div class="totlbl">limites ativos</div><div class="tot" style="font-size:30px">${S.goals.length}</div></div>
+    ${S.goals.length?items:'<div class="empty">Nenhum limite ainda. Defina abaixo — ou diga no chat “não gastar mais de 500 com compras”.</div>'}
+    <div class="seclbl">novo limite</div>
+    <div class="fxform">
+      <div class="row" style="gap:8px">
+        <select id="glcat" class="catsel" style="max-width:none;flex:1">${opts}</select>
+        <input id="glamt" inputmode="decimal" placeholder="valor por mês" style="flex:1" />
+      </div>
+      <button id="gladd" class="addbtn">Definir limite</button>
+    </div>
+  </div>`;
+}
+
 function render(){
   const app=document.getElementById("app");
   let main;
@@ -336,14 +389,17 @@ function render(){
       </div>`;
   } else if(S.view==="report"){
     main=`<div class="body">${reportHTML()}</div>`;
-  } else {
+  } else if(S.view==="fixed"){
     main=`<div class="body">${fixedHTML()}</div>`;
+  } else {
+    main=`<div class="body">${limitsHTML()}</div>`;
   }
   app.innerHTML=`<div class="head"><span class="logo">EcoFin</span><span class="tag">finanças no modo conversa</span></div>
     <div class="tabs">
       <button class="tab ${S.view==='chat'?'on':''}" data-view="chat">${IC.chat} Conversa</button>
       <button class="tab ${S.view==='report'?'on':''}" data-view="report">${IC.pie} Relatório</button>
       <button class="tab ${S.view==='fixed'?'on':''}" data-view="fixed">${IC.repeat} Fixos</button>
+      <button class="tab ${S.view==='limits'?'on':''}" data-view="limits">${IC.gauge} Limites</button>
     </div>${main}`;
 
   app.querySelectorAll("[data-view]").forEach(b=>b.onclick=()=>{S.view=b.dataset.view; render();});
@@ -355,11 +411,15 @@ function render(){
   app.querySelectorAll(".fixpay").forEach(b=>b.onclick=()=>toggleFixedPaid(b.dataset.id));
   const fxadd=app.querySelector("#fxadd");
   if(fxadd) fxadd.onclick=()=>addFixed(app.querySelector("#fxname").value, app.querySelector("#fxamt").value, app.querySelector("#fxcat").value);
+  const gladd=app.querySelector("#gladd");
+  if(gladd) gladd.onclick=()=>addGoal(app.querySelector("#glcat").value, app.querySelector("#glamt").value);
+  app.querySelectorAll(".goaldel").forEach(b=>b.onclick=()=>delGoal(b.dataset.id));
   const send=app.querySelector("#send"), inp=app.querySelector("#inp"), mic=app.querySelector("#mic");
   if(send) send.onclick=()=>handleSend(inp.value);
   if(inp) inp.onkeydown=e=>{ if(e.key==="Enter") handleSend(inp.value); };
   if(mic) mic.onclick=toggleVoice;
   const body=document.getElementById("body"); if(body) body.scrollTop=body.scrollHeight;
+  requestAnimationFrame(()=>{ app.querySelectorAll(".barfill").forEach(el=>{ el.style.width=el.dataset.w||"0"; }); });
 }
 
 /* ----------- init ----------- */
